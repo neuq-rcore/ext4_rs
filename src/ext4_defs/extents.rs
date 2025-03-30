@@ -1,3 +1,5 @@
+use core::mem::MaybeUninit;
+
 use crate::prelude::*;
 use crate::return_errno_with_message;
 
@@ -94,24 +96,12 @@ pub struct ExtentPathNode {
 impl Ext4ExtentHeader {
     /// Load the extent header from u32 array.
     pub fn load_from_u32(data: &[u32]) -> Self {
-        unsafe { core::ptr::read(data.as_ptr() as *const _) }
-    }
-
-    /// Load the extent header from u32 array mutably.
-    pub fn load_from_u32_mut(data: &mut [u32]) -> &mut Self {
-        let ptr = data.as_mut_ptr() as *mut Self;
-        unsafe { &mut *ptr }
+        load_from_slice(data)
     }
 
     /// Load the extent header from u8 array.
     pub fn load_from_u8(data: &[u8]) -> Self {
-        unsafe { core::ptr::read(data.as_ptr() as *const _) }
-    }
-
-    /// Load the extent header from u8 array mutably.
-    pub fn load_from_u8_mut(data: &mut [u8]) -> &mut Self {
-        let ptr = data.as_mut_ptr() as *mut Self;
-        unsafe { &mut *ptr }
+        load_from_slice(data)
     }
 
     /// Is the node a leaf node?
@@ -120,26 +110,40 @@ impl Ext4ExtentHeader {
     }
 }
 
+fn load_from_slice<T, TValue>(data: &[T]) -> TValue {
+    let len = data.len() * core::mem::size_of::<T>();
+    assert!(len >= core::mem::size_of::<TValue>());
+
+    let mut value = MaybeUninit::uninit();
+
+    unsafe {
+        core::slice::from_raw_parts_mut(value.as_mut_ptr() as *mut u8, core::mem::size_of_val(&value))
+            .copy_from_slice(core::slice::from_raw_parts(data.as_ptr() as *const u8, core::mem::size_of_val(&value)));
+
+        value.assume_init()
+    }
+}
+
 /// load methods for Ext4ExtentIndex
 impl Ext4ExtentIndex {
     /// Load the extent header from u32 array.
     pub fn load_from_u32(data: &[u32]) -> Self {
-        unsafe { core::ptr::read(data.as_ptr() as *const _) }
+        load_from_slice(data)
     }
 
     /// Load the extent header from u32 array mutably.
     pub fn load_from_u32_mut(data: &mut [u32]) -> Self {
-        unsafe { core::ptr::read(data.as_mut_ptr() as *mut _) }
+        load_from_slice(data)
     }
 
     /// Load the extent header from u8 array.
     pub fn load_from_u8(data: &[u8]) -> Self {
-        unsafe { core::ptr::read(data.as_ptr() as *const _) }
+        load_from_slice(data)
     }
 
     /// Load the extent header from u8 array mutably.
     pub fn load_from_u8_mut(data: &mut [u8]) -> Self {
-        unsafe { core::ptr::read(data.as_mut_ptr() as *mut _) }
+        load_from_slice(data)
     }
 }
 
@@ -147,24 +151,22 @@ impl Ext4ExtentIndex {
 impl Ext4Extent {
     /// Load the extent header from u32 array.
     pub fn load_from_u32(data: &[u32]) -> Self {
-        unsafe { core::ptr::read(data.as_ptr() as *const _) }
+        load_from_slice(data)
     }
 
     /// Load the extent header from u32 array mutably.
     pub fn load_from_u32_mut(data: &mut [u32]) -> Self {
-        let ptr = data.as_mut_ptr() as *mut Self;
-        unsafe { *ptr }
+        load_from_slice(data)
     }
 
     /// Load the extent header from u8 array.
     pub fn load_from_u8(data: &[u8]) -> Self {
-        unsafe { core::ptr::read(data.as_ptr() as *const _) }
+        load_from_slice(data)
     }
 
     /// Load the extent header from u8 array mutably.
     pub fn load_from_u8_mut(data: &mut [u8]) -> Self {
-        let ptr = data.as_mut_ptr() as *mut Self;
-        unsafe { *ptr }
+        load_from_slice(data)
     }
 }
 
@@ -213,7 +215,7 @@ impl ExtentNode {
                 root_data[i] = u32::from_le_bytes(chunk.try_into().unwrap());
             }
 
-            let header = *Ext4ExtentHeader::load_from_u32_mut(&mut root_data);
+            let header = Ext4ExtentHeader::load_from_u32(&mut root_data);
 
             Ok(ExtentNode {
                 header,
@@ -224,7 +226,7 @@ impl ExtentNode {
             if data.len() != BLOCK_SIZE {
                 return_errno_with_message!(Errno::EINVAL, "Invalid data length for root node");
             }
-            let mut header = *Ext4ExtentHeader::load_from_u8_mut(&mut data[..size_of::<Ext4ExtentHeader>()]);
+            let mut header = Ext4ExtentHeader::load_from_u8(&mut data[..size_of::<Ext4ExtentHeader>()]);
             Ok(ExtentNode {
                 header,
                 data: NodeData::Internal(data.to_vec()),
@@ -571,10 +573,17 @@ mod tests {
 
         let internal_data: Vec<u8> = unsafe {
             let mut data = vec![0; BLOCK_SIZE];
-            let header_ptr = data.as_mut_ptr() as *mut Ext4ExtentHeader;
-            (*header_ptr).entries_count = 2;
-            let extent_ptr = header_ptr.add(1) as *mut Ext4Extent;
-            core::ptr::copy_nonoverlapping(extents.as_ptr(), extent_ptr, 2);
+
+            let header = MaybeUninit::new(Ext4ExtentHeader {
+                entries_count: 2,
+                ..core::mem::zeroed()
+            });
+
+            data[..core::mem::size_of_val(&header)].copy_from_slice(core::slice::from_raw_parts(header.as_ptr() as *const u8, core::mem::size_of_val(&header)));
+
+            data[core::mem::size_of_val(&header)..core::mem::size_of_val(&header) + core::mem::size_of_val(&extents)]
+                .copy_from_slice(core::slice::from_raw_parts(extents.as_ptr() as *const u8, core::mem::size_of_val(&extents)));
+
             data
         };
 
@@ -622,10 +631,17 @@ mod tests {
 
         let internal_data: Vec<u8> = unsafe {
             let mut data = vec![0; BLOCK_SIZE];
-            let header_ptr = data.as_mut_ptr() as *mut Ext4ExtentHeader;
-            (*header_ptr).entries_count = 2;
-            let index_ptr = header_ptr.add(1) as *mut Ext4ExtentIndex;
-            core::ptr::copy_nonoverlapping(indexes.as_ptr(), index_ptr, 2);
+
+            let header = MaybeUninit::new(Ext4ExtentHeader {
+                entries_count: 2,
+                ..core::mem::zeroed()
+            });
+
+            data[..core::mem::size_of_val(&header)].copy_from_slice(core::slice::from_raw_parts(header.as_ptr() as *const u8, core::mem::size_of_val(&header)));
+
+            data[core::mem::size_of_val(&header)..core::mem::size_of_val(&header) + core::mem::size_of_val(&indexes)]
+                .copy_from_slice(core::slice::from_raw_parts(indexes.as_ptr() as *const u8, core::mem::size_of_val(&indexes)));
+
             data
         };
 
@@ -677,10 +693,17 @@ mod tests {
 
         let internal_data: Vec<u8> = unsafe {
             let mut data = vec![0; BLOCK_SIZE];
-            let header_ptr = data.as_mut_ptr() as *mut Ext4ExtentHeader;
-            (*header_ptr).entries_count = 2;
-            let index_ptr = header_ptr.add(1) as *mut Ext4ExtentIndex;
-            core::ptr::copy_nonoverlapping(indexes.as_ptr(), index_ptr, 2);
+
+            let header = MaybeUninit::new(Ext4ExtentHeader {
+                entries_count: 2,
+                ..core::mem::zeroed()
+            });
+
+            data[..core::mem::size_of_val(&header)].copy_from_slice(core::slice::from_raw_parts(header.as_ptr() as *const u8, core::mem::size_of_val(&header)));
+
+            data[core::mem::size_of_val(&header)..core::mem::size_of_val(&header) + core::mem::size_of_val(&indexes)]
+                .copy_from_slice(core::slice::from_raw_parts(indexes.as_ptr() as *const u8, core::mem::size_of_val(&indexes)));
+
             data
         };
 
@@ -724,10 +747,17 @@ mod tests {
 
         let internal_data: Vec<u8> = unsafe {
             let mut data = vec![0; BLOCK_SIZE];
-            let header_ptr = data.as_mut_ptr() as *mut Ext4ExtentHeader;
-            (*header_ptr).entries_count = 2;
-            let extent_ptr = header_ptr.add(1) as *mut Ext4Extent;
-            core::ptr::copy_nonoverlapping(extents.as_ptr(), extent_ptr, 2);
+
+            let header = MaybeUninit::new(Ext4ExtentHeader {
+                entries_count: 2,
+                ..core::mem::zeroed()
+            });
+
+            data[..core::mem::size_of_val(&header)].copy_from_slice(core::slice::from_raw_parts(header.as_ptr() as *const u8, core::mem::size_of_val(&header)));
+
+            data[core::mem::size_of_val(&header)..core::mem::size_of_val(&header) + core::mem::size_of_val(&extents)]
+                .copy_from_slice(core::slice::from_raw_parts(extents.as_ptr() as *const u8, core::mem::size_of_val(&extents)));
+
             data
         };
 

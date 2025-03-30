@@ -1,3 +1,5 @@
+use core::mem::MaybeUninit;
+
 use crate::prelude::*;
 use crate::utils::*;
 
@@ -341,50 +343,78 @@ impl Ext4Inode {
         self.root_extent_header().depth
     }
 
-    pub fn root_extent_header_ref(&self) -> &Ext4ExtentHeader {
-        let header_ptr = self.block.as_ptr() as *const Ext4ExtentHeader;
-        unsafe { &*header_ptr }
+    pub fn root_first_index_mut(&mut self) -> &mut Ext4ExtentIndex {
+        let mut index = MaybeUninit::uninit();
+
+        unsafe {
+            core::slice::from_raw_parts_mut(index.as_mut_ptr() as *mut u8, core::mem::size_of_val(&index))
+                .copy_from_slice(core::slice::from_raw_parts(self.block.as_ptr().cast::<Ext4ExtentHeader>().add(1).cast::<u8>(), core::mem::size_of_val(&index)));
+
+            index.assume_init()
+        }
     }
 
     pub fn root_extent_header(&self) -> Ext4ExtentHeader {
-        let header_ptr = self.block.as_ptr() as *const Ext4ExtentHeader;
-        unsafe { *header_ptr }
+        let mut header = MaybeUninit::uninit();
+
+        unsafe {
+            core::slice::from_raw_parts_mut(header.as_mut_ptr() as *mut u8, core::mem::size_of_val(&header))
+                .copy_from_slice(core::slice::from_raw_parts(self.block.as_ptr().cast(), core::mem::size_of_val(&header)));
+
+            header.assume_init()
+        }
     }
 
-    pub fn root_extent_header_mut(&mut self) -> &mut Ext4ExtentHeader {
-        let header_ptr = self.block.as_mut_ptr() as *mut Ext4ExtentHeader;
-        unsafe { &mut *header_ptr }
+    pub fn write_root_extent_header(&mut self, header: &Ext4ExtentHeader) {
+        unsafe {
+            core::slice::from_raw_parts_mut(self.block.as_mut_ptr().cast(), core::mem::size_of_val(&header))
+                .copy_from_slice(core::slice::from_raw_parts(header as *const _ as *const u8, core::mem::size_of_val(&header)));
+        }
     }
 
-    pub fn root_extent_mut_at(&mut self, pos: usize) -> &mut Ext4Extent {
-        let header_ptr = self.block.as_mut_ptr() as *mut Ext4ExtentHeader;
-        unsafe { &mut *(header_ptr.add(1) as *mut Ext4Extent).add(pos) }
+    pub fn root_extent_at(&self, pos: usize) -> Ext4Extent {
+        let mut extent = MaybeUninit::uninit();
+
+        unsafe {
+            core::slice::from_raw_parts_mut(
+                extent.as_mut_ptr() as *mut u8,
+                core::mem::size_of_val(&extent))
+                .copy_from_slice(core::slice::from_raw_parts(
+                    self.block.as_ptr().cast::<Ext4ExtentHeader>().add(1)
+                        .cast::<Ext4Extent>()
+                        .add(pos)
+                        .cast::<u8>(),
+                    core::mem::size_of_val(&extent)));
+
+            extent.assume_init()
+        }
     }
 
-    pub fn root_extent_ref_at(&mut self, pos: usize) -> &Ext4Extent {
-        let header_ptr = self.block.as_ptr() as *const Ext4ExtentHeader;
-        unsafe { &*(header_ptr.add(1) as *const Ext4Extent).add(pos) }
-    }
-
-    pub fn root_extent_at(&mut self, pos: usize) -> Ext4Extent {
-        let header_ptr = self.block.as_ptr() as *const Ext4ExtentHeader;
-        unsafe { *(header_ptr.add(1) as *const Ext4Extent).add(pos) }
-    }
-
-    pub fn root_first_index_mut(&mut self) -> &mut Ext4ExtentIndex {
-        let header_ptr = self.block.as_mut_ptr() as *mut Ext4ExtentHeader;
-        unsafe { &mut *(header_ptr.add(1) as *mut Ext4ExtentIndex) }
+    pub fn write_root_extent_at(&mut self, pos: usize, extent: &Ext4Extent) {
+        unsafe {
+            core::slice::from_raw_parts_mut(
+                self.block.as_mut_ptr().cast::<Ext4ExtentHeader>().add(1)
+                    .cast::<Ext4Extent>()
+                    .add(pos)
+                    .cast::<u8>(),
+                core::mem::size_of_val(extent))
+                .copy_from_slice(core::slice::from_raw_parts(
+                    extent as *const _ as *const u8,
+                    core::mem::size_of_val(extent)
+                ))
+        }
     }
 
     pub fn extent_tree_init(&mut self) {
-        let header_ptr = self.block.as_mut_ptr() as *mut Ext4ExtentHeader;
-        unsafe {
-            (*header_ptr).set_magic();
-            (*header_ptr).set_entries_count(0);
-            (*header_ptr).set_max_entries_count(4);
-            (*header_ptr).set_depth(0);
-            (*header_ptr).set_generation(0);
-        }
+        let mut header = self.root_extent_header();
+
+        header.set_magic();
+        header.set_entries_count(0);
+        header.set_max_entries_count(4);
+        header.set_depth(0);
+        header.set_generation(0);
+
+        self.write_root_extent_header(&header);
     }
 
     fn get_checksum(&self, super_block: &Ext4Superblock) -> u32 {
@@ -407,13 +437,6 @@ impl Ext4Inode {
         self.osd2.l_i_checksum_lo = (checksum & 0xffff) as u16;
         if inode_size > 128 {
             self.i_checksum_hi = (checksum >> 16) as u16;
-        }
-    }
-    fn copy_to_slice(&self, slice: &mut [u8]) {
-        unsafe {
-            let inode_ptr = self as *const Ext4Inode as *const u8;
-            let array_ptr = slice.as_ptr() as *mut u8;
-            core::ptr::copy_nonoverlapping(inode_ptr, array_ptr, 0x9c);
         }
     }
     #[allow(unused)]
@@ -439,7 +462,14 @@ impl Ext4Inode {
         checksum = ext4_crc32c(checksum, &ino_gen.to_le_bytes(), 4);
 
         let mut raw_data = [0u8; 0x100];
-        self.copy_to_slice(&mut raw_data);
+        let val = MaybeUninit::new(*self);
+        unsafe { 
+            raw_data[..core::mem::size_of_val(&val)].copy_from_slice(
+            core::slice::from_raw_parts(
+                val.as_ptr() as *const u8, 
+                core::mem::size_of_val(&val)
+                ));
+        }
 
         // inode checksum
         checksum = ext4_crc32c(checksum, &raw_data, inode_size as u32);

@@ -1,3 +1,5 @@
+use core::mem::MaybeUninit;
+
 use crate::prelude::*;
 use crate::utils::*;
 
@@ -153,8 +155,9 @@ impl Ext4BlockGroup {
         checksum = ext4_crc32c(checksum, &bgid.to_le_bytes(), 4);
 
         // cast self to &[u8]
+        let val = MaybeUninit::new(*self);
         let self_bytes =
-            unsafe { core::slice::from_raw_parts(self as *const _ as *const u8, 0x40) };
+            unsafe { core::slice::from_raw_parts(val.as_ptr() as *const u8, core::mem::size_of_val(&val)) };
 
         // bg checksum
         checksum = ext4_crc32c(checksum, self_bytes, desc_size as u32);

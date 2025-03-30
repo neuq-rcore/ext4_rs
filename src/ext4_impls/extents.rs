@@ -121,7 +121,7 @@ impl Ext4 {
 
                 if at_root {
                     // we are at root
-                    *inode_ref.inode.root_extent_mut_at(node.position) = ex;
+                    inode_ref.inode.write_root_extent_at(node.position, &ex);
                 }
                 return Ok(());
             }
@@ -272,7 +272,7 @@ impl Ext4 {
             let block = node.pblock_of_node;
             let new_ex_offset = core::mem::size_of::<Ext4ExtentHeader>() + core::mem::size_of::<Ext4Extent>() * (node.position);
             let mut ext4block = Block::load(self.block_device.clone(), block * BLOCK_SIZE);
-            let left_ext:&mut Ext4Extent = ext4block.read_offset_as_mut(new_ex_offset);
+            let mut left_ext: Ext4Extent = ext4block.read_offset_as(new_ex_offset);
 
             let unwritten = left_ext.is_unwritten();
             let len = left_ext.get_actual_len() + right_ext.get_actual_len();
@@ -280,6 +280,12 @@ impl Ext4 {
             if unwritten {
                 left_ext.mark_unwritten();
             }
+
+            ext4block.write_offset(
+                new_ex_offset, 
+                unsafe { core::slice::from_raw_parts(&left_ext as *const _ as *const u8, core::mem::size_of_val(&left_ext))},
+                core::mem::size_of_val(&left_ext)
+            );
 
             ext4block.sync_blk_to_disk(self.block_device.clone());
         }
@@ -301,17 +307,20 @@ impl Ext4 {
         // insert at root
         if depth == 0 {
             // Node is empty (no extents)
+            let mut header = inode_ref.inode.root_extent_header();
             if header.entries_count == 0 {
-                *inode_ref.inode.root_extent_mut_at(node.position) = *new_extent;
-                inode_ref.inode.root_extent_header_mut().entries_count += 1;
+                inode_ref.inode.write_root_extent_at(node.position, new_extent);
+                header.entries_count += 1;
+                inode_ref.inode.write_root_extent_header(&header);
 
                 self.write_back_inode(inode_ref);
                 return Ok(());
             }
             // Not empty, insert at search result pos + 1
             log::trace!("insert newex at pos {:x?} current entry_count {:x?} ex {:x?}", node.position + 1 , header.entries_count, new_extent);
-            *inode_ref.inode.root_extent_mut_at(node.position + 1) = *new_extent;
-            inode_ref.inode.root_extent_header_mut().entries_count += 1;
+            inode_ref.inode.write_root_extent_at(node.position + 1, new_extent);
+            header.entries_count += 1;
+            inode_ref.inode.write_root_extent_header(&header);
             return Ok(());
         }else{
             // insert at nonroot
@@ -324,12 +333,21 @@ impl Ext4 {
             let new_ex_offset = core::mem::size_of::<Ext4ExtentHeader>() + core::mem::size_of::<Ext4Extent>() * (node.position + 1);
 
             // insert new extent
-            let ex: &mut Ext4Extent = ext4block.read_offset_as_mut(new_ex_offset);
-            *ex = *new_extent;
-            let header: &mut Ext4ExtentHeader = ext4block.read_offset_as_mut(0);
+            ext4block.write_offset(
+                new_ex_offset,
+                unsafe { core::slice::from_raw_parts(new_extent as *const _ as *const u8, core::mem::size_of_val(new_extent)) },
+                core::mem::size_of_val(new_extent)
+            );
+            let mut header: Ext4ExtentHeader = ext4block.read_as();
 
             // update entry count 
             header.entries_count += 1;
+
+            ext4block.write_offset(
+                core::mem::size_of::<Ext4ExtentHeader>(),
+                unsafe { core::slice::from_raw_parts(&header as *const _ as *const u8, core::mem::size_of_val(&header)) },
+                core::mem::size_of_val(&header)
+            );
 
             // sync to disk
             ext4block.sync_blk_to_disk(self.block_device.clone());
@@ -379,16 +397,23 @@ impl Ext4 {
         new_ext4block.data[60..].fill(0);
 
         // set new block header
-        let mut new_header = Ext4ExtentHeader::load_from_u8_mut(&mut new_ext4block.data);
+        let mut new_header = Ext4ExtentHeader::load_from_u8(&mut new_ext4block.data);
         new_header.set_magic();
         let space = (BLOCK_SIZE - core::mem::size_of::<Ext4ExtentHeader>()) / core::mem::size_of::<Ext4Extent>();
         new_header.set_max_entries_count(space as u16);
+        new_ext4block.write_offset(
+            0,
+            unsafe { core::slice::from_raw_parts(&new_header as *const _ as *const u8, core::mem::size_of_val(&new_header)) },
+            core::mem::size_of_val(&new_header)
+        );
         log::info!("new_header max entries {:x?}", new_header.max_entries_count);
         
         // Update top-level index: num,max,pointer
-        let mut root_header = inode_ref.inode.root_extent_header_mut();
+        let mut root_header = inode_ref.inode.root_extent_header();
         root_header.set_entries_count(1);
         root_header.add_depth();
+
+        inode_ref.inode.write_root_extent_header(&root_header);
 
         let root_depth = root_header.depth;
         let root_first_extent_block = inode_ref.inode.root_extent_at(0).first_block;
@@ -660,8 +685,10 @@ impl Ext4 {
 
         // start from pos
         for i in pos..entry_count as usize {
-            let ex: &mut Ext4Extent = ext4block
-                .read_offset_as_mut(size_of::<Ext4ExtentHeader>() + i * size_of::<Ext4Extent>());
+            let ex_offset = size_of::<Ext4ExtentHeader>() + i * size_of::<Ext4Extent>();
+
+            let mut ex: Ext4Extent = ext4block
+                .read_offset_as(ex_offset);
 
             if ex.first_block > to {
                 break;
@@ -693,7 +720,7 @@ impl Ext4 {
                     len -= new_len as u16;
                     new_start = to + 1;
                     newblock += (to + 1 - start) as u64;
-                    ex2 = *ex;
+                    ex2 = ex;
                 }
             }
 
@@ -706,7 +733,7 @@ impl Ext4 {
             //                                  new_start
 
             // Remove blocks within the extent
-            self.ext_remove_blocks(inode_ref, ex, start, start + len as u32 - 1);
+            self.ext_remove_blocks(inode_ref, &mut ex, start, start + len as u32 - 1);
 
             ex.first_block = new_start;
             // log::trace!("after remove leaf ex first_block {:x?}", ex.first_block);
@@ -722,6 +749,12 @@ impl Ext4 {
                     ex.mark_unwritten();
                 }
             }
+
+            ext4block.write_offset(
+                ex_offset,
+                unsafe { core::slice::from_raw_parts(&ex as *const _ as *const u8, core::mem::size_of_val(&ex))},
+                core::mem::size_of_val(&ex),
+            );
         }
 
         // Move remaining extents to the start:

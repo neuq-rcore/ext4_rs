@@ -1,3 +1,5 @@
+use core::mem::MaybeUninit;
+
 use crate::prelude::*;
 use crate::return_errno_with_message;
 
@@ -156,11 +158,10 @@ impl Ext4 {
         let parent_de: Ext4DirEntry = dst_blk.read_offset_as(0);
 
         let tail_offset = BLOCK_SIZE - size_of::<Ext4DirEntryTail>();
-        let mut tail: Ext4DirEntryTail = *dst_blk.read_offset_as_mut(tail_offset);
+        let mut tail: Ext4DirEntryTail = dst_blk.read_offset_as(tail_offset);
 
         tail.tail_set_csum(&self.super_block, &parent_de, &dst_blk.data[..], ino_gen);
-
-        tail.copy_to_slice(&mut dst_blk.data);
+        copy_val_to_block(&tail, &mut dst_blk.data, tail_offset);
     }
 
     /// Add a new entry to a directory
@@ -283,8 +284,8 @@ impl Ext4 {
                 new_entry.write_entry(free_space as u16, child_inode, name, de_type);
 
                 // update parent_de and new_de to blk_data
-                de.copy_to_slice(&mut block.data, offset);
-                new_entry.copy_to_slice(&mut block.data, offset + sz);
+                copy_val_to_block(&de, &mut block.data, offset);
+                copy_val_to_block(&new_entry, &mut block.data, offset + sz);
 
                 // Sync to disk
                 block.sync_blk_to_disk(self.block_device.clone());
@@ -316,13 +317,14 @@ impl Ext4 {
         let mut new_entry = Ext4DirEntry::default();
         let el = BLOCK_SIZE - size_of::<Ext4DirEntryTail>();
         new_entry.write_entry(el as u16, inode, name, de_type);
-        new_entry.copy_to_slice(&mut block.data, 0);
+        copy_val_to_block(&new_entry, &mut block.data, 0);
 
         copy_dir_entry_to_array(&new_entry, &mut block.data, 0);
 
         // init tail for new block
         let tail = Ext4DirEntryTail::new();
-        tail.copy_to_slice(&mut block.data);
+        let tail_offset = block.data.len() - core::mem::size_of_val(&tail);
+        copy_val_to_block(&tail, &mut block.data, tail_offset);
     }
 
     pub fn dir_remove_entry(&self, parent: &mut Ext4InodeRef, path: &str) -> Result<usize> {
@@ -336,13 +338,17 @@ impl Ext4 {
         let de_del_entry_len = result.dentry.entry_len();
 
         // prev entry
-        let pde: &mut Ext4DirEntry = ext4block.read_offset_as_mut(result.prev_offset);
+        let mut pde: Ext4DirEntry = ext4block.read_offset_as(result.prev_offset);
 
         pde.entry_len += de_del_entry_len;
 
-        let de_del: &mut Ext4DirEntry = ext4block.read_offset_as_mut(result.offset);
+        copy_val_to_block(&pde, &mut ext4block.data, result.prev_offset);
+
+        let mut de_del: Ext4DirEntry = ext4block.read_offset_as(result.offset);
 
         de_del.inode = 0;
+
+        copy_val_to_block(&de_del, &mut ext4block.data, result.offset);
 
         self.dir_set_csum(&mut ext4block, parent.inode.generation());
         ext4block.sync_blk_to_disk(self.block_device.clone());
@@ -435,4 +441,13 @@ pub fn copy_dir_entry_to_array(header: &Ext4DirEntry, array: &mut [u8], offset: 
         let count = core::mem::size_of::<Ext4DirEntry>() / core::mem::size_of::<u8>();
         core::ptr::copy_nonoverlapping(de_ptr, array_ptr.add(offset), count);
     }
+}
+
+fn copy_val_to_block<TValue: Copy>(val: &TValue, block: &mut [u8], offset: usize) {
+    assert!(block.len() >= offset + core::mem::size_of::<TValue>());
+
+    let val = MaybeUninit::new(*val);
+    let val_bytes = unsafe { core::slice::from_raw_parts(val.as_ptr() as *const u8, core::mem::size_of_val(&val)) };
+
+    block[offset..offset + core::mem::size_of::<TValue>()].copy_from_slice(val_bytes);
 }
