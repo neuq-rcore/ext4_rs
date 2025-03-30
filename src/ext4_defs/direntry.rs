@@ -219,7 +219,7 @@ impl Ext4DirEntry {
         csum = ext4_crc32c(csum, &ino_index.to_le_bytes(), 4);
         csum = ext4_crc32c(csum, &ino_gen.to_le_bytes(), 4);
         let mut data = [0u8; 0xff4];
-        data[..blk_data.len()].copy_from_slice(blk_data);
+        data.copy_from_slice(&blk_data[..0xff4]);
 
         csum = ext4_crc32c(csum, &data[..], 0xff4);
         csum
