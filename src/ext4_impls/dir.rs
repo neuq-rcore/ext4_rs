@@ -139,7 +139,7 @@ impl Ext4 {
                 let mut offset = 0;
 
                 // iterate all entries in a block
-                while offset < BLOCK_SIZE - core::mem::size_of::<Ext4DirEntryTail>() {
+                while offset < BLOCK_SIZE - core::mem::size_of::<Ext4DirEntry>() {
                     let de: Ext4DirEntry = ext4block.read_offset_as(offset);
                     if !de.unused() {
                         entries.push(de);
